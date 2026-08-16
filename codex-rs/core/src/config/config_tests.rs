@@ -1009,6 +1009,35 @@ region = "us-west-2"
 }
 
 #[tokio::test]
+async fn load_config_accepts_chat_wire_provider() {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model = "deepseek-v4-pro"
+model_provider = "deepseek"
+
+[model_providers.deepseek]
+name = "DeepSeek V4"
+base_url = "https://api.deepseek.com"
+env_key = "DEEPSEEK_API_KEY"
+wire_api = "chat"
+"#,
+    )
+    .expect("chat provider config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(config.model_provider_id, "deepseek");
+    assert_eq!(config.model_provider.name, "DeepSeek V4");
+    assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+}
+
+#[tokio::test]
 async fn load_config_applies_amazon_bedrock_transport_overrides() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"

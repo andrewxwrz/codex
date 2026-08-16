@@ -111,7 +111,7 @@ supports_standalone_web_search = true
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
+fn test_deserialize_chat_wire_api_is_accepted() {
     let provider_toml = r#"
 name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
@@ -119,8 +119,8 @@ env_key = "OPENAI_API_KEY"
 wire_api = "chat"
         "#;
 
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Chat);
 }
 
 #[test]
@@ -596,4 +596,89 @@ refresh_interval_ms = 0
     let auth = provider.auth.expect("auth config should deserialize");
     assert_eq!(auth.refresh_interval_ms, 0);
     assert_eq!(auth.refresh_interval(), None);
+}
+
+#[test]
+fn test_wire_api_defaults_to_responses() {
+    assert_eq!(WireApi::default(), WireApi::Responses);
+
+    let provider: ModelProviderInfo = toml::from_str(r#"
+name = "No Wire API"
+        "#)
+    .unwrap();
+    assert_eq!(provider.wire_api, WireApi::Responses);
+}
+
+#[test]
+fn test_wire_api_responses_round_trip() {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Wire {
+        wire_api: WireApi,
+    }
+    let parsed: Wire = toml::from_str(r#"wire_api = "responses""#).unwrap();
+    assert_eq!(parsed.wire_api, WireApi::Responses);
+    assert_eq!(
+        toml::to_string(&Wire {
+            wire_api: WireApi::Responses
+        })
+        .unwrap()
+        .trim(),
+        "wire_api = \"responses\""
+    );
+}
+
+#[test]
+fn test_wire_api_chat_round_trip() {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Wire {
+        wire_api: WireApi,
+    }
+    let parsed: Wire = toml::from_str(r#"wire_api = "chat""#).unwrap();
+    assert_eq!(parsed.wire_api, WireApi::Chat);
+    assert_eq!(
+        toml::to_string(&Wire {
+            wire_api: WireApi::Chat
+        })
+        .unwrap()
+        .trim(),
+        "wire_api = \"chat\""
+    );
+}
+
+#[test]
+fn test_wire_api_invalid_value_errors() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Wire {
+        wire_api: WireApi,
+    }
+    let err = toml::from_str::<Wire>(r#"wire_api = "completions""#).unwrap_err();
+    assert!(err.to_string().contains("completions"));
+}
+
+#[test]
+fn test_deserialize_chat_provider_toml() {
+    let deepseek_provider_toml = r#"
+name = "DeepSeek V4"
+base_url = "https://api.deepseek.com"
+env_key = "DEEPSEEK_API_KEY"
+wire_api = "chat"
+        "#;
+    let provider: ModelProviderInfo = toml::from_str(deepseek_provider_toml).unwrap();
+    assert_eq!(provider.name, "DeepSeek V4");
+    assert_eq!(provider.base_url.as_deref(), Some("https://api.deepseek.com"));
+    assert_eq!(provider.env_key.as_deref(), Some("DEEPSEEK_API_KEY"));
+    assert_eq!(provider.wire_api, WireApi::Chat);
+}
+
+#[test]
+fn test_serialize_chat_provider_includes_wire_api() {
+    let provider = ModelProviderInfo {
+        name: "DeepSeek V4".into(),
+        base_url: Some("https://api.deepseek.com".into()),
+        env_key: Some("DEEPSEEK_API_KEY".into()),
+        wire_api: WireApi::Chat,
+        ..Default::default()
+    };
+    let serialized = toml::to_string(&provider).unwrap();
+    assert!(serialized.contains("wire_api = \"chat\""));
 }

@@ -292,6 +292,9 @@ fn proto_string_map(values: HashMap<String, String>) -> proto::StringMap {
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        // Remote thread config has no Chat variant yet; persist as unspecified
+        // so loading fails loudly instead of silently turning Chat into Responses.
+        WireApi::Chat => proto::WireApi::Unspecified,
     }
 }
 

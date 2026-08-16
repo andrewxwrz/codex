@@ -1898,6 +1898,12 @@ impl ModelClientSession {
                 )
                 .await
             }
+            // The Chat wire is configurable (Slice 2) but not yet connected to
+            // the restored ChatClient (Slice 3); reject until then.
+            WireApi::Chat => Err(CodexErr::UnsupportedOperation(
+                "wire_api = \"chat\" is not supported yet in this build; set wire_api = \"responses\" or use a Responses-compatible provider"
+                    .to_string(),
+            )),
         }
     }
 
