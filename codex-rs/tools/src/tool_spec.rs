@@ -12,6 +12,7 @@ use codex_protocol::config_types::WebSearchUserLocation as ConfigWebSearchUserLo
 use codex_protocol::config_types::WebSearchUserLocationType;
 use serde::Serialize;
 use serde_json::Value;
+use serde_json::json;
 use serde_json::value::RawValue;
 use std::sync::Arc;
 
@@ -89,6 +90,44 @@ pub fn create_tools_json_for_responses_api(
         tools_json.push(json);
     }
 
+    Ok(tools_json)
+}
+
+/// Rewrites the Responses tool JSON into the Chat Completions tool-call format.
+///
+/// Only plain `function` tools are representable; hosted/namespaced,
+/// tool-search, web-search, and freeform tools are excluded (the Chat wire has
+/// no equivalent, so translating them would be incorrect).
+pub fn create_tools_json_for_chat_completions_api(
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>, serde_json::Error> {
+    let responses_api_tools_json = create_tools_json_for_responses_api(tools)?;
+    let tools_json = responses_api_tools_json
+        .into_iter()
+        .filter_map(|mut tool| {
+            if tool.get("type") != Some(&Value::String("function".to_string())) {
+                return None;
+            }
+
+            if let Some(map) = tool.as_object_mut() {
+                let name = map
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                // "type" is moved to the chat wrapper; the rest of the
+                // Responses tool object becomes the chat `function` object.
+                map.remove("type");
+                Some(json!({
+                    "type": "function",
+                    "name": name,
+                    "function": map,
+                }))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<Value>>();
     Ok(tools_json)
 }
 

@@ -8,6 +8,7 @@ use crate::FreeformToolFormat;
 use crate::JsonSchema;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
+use crate::create_tools_json_for_chat_completions_api;
 use crate::create_tools_json_for_responses_api;
 use crate::create_tools_json_for_responses_lite;
 use crate::create_tools_raw_json_for_responses_api;
@@ -84,6 +85,46 @@ fn tool_spec_name_covers_all_variants() {
         })
         .name(),
         "exec"
+    );
+}
+
+#[test]
+fn chat_tools_json_keeps_only_function_tools() {
+    let tools = vec![
+        ToolSpec::Function(ResponsesApiTool {
+            name: "read_file".to_string(),
+            description: "Read a file".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::new(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
+            output_schema: None,
+        }),
+        ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "mcp__demo__".to_string(),
+            description: "Demo tools".to_string(),
+            tools: Vec::new(),
+        }),
+    ];
+    let tools_json = create_tools_json_for_chat_completions_api(&tools).unwrap();
+    assert_eq!(
+        tools_json.len(),
+        1,
+        "namespaced tools are excluded on the chat wire"
+    );
+    assert_eq!(tools_json[0]["type"], json!("function"));
+    assert_eq!(tools_json[0]["name"], json!("read_file"));
+    assert_eq!(tools_json[0]["function"]["name"], json!("read_file"));
+    assert_eq!(
+        tools_json[0]["function"]["description"],
+        json!("Read a file")
+    );
+    assert!(
+        tools_json[0]["function"].get("type").is_none(),
+        "the Responses-only type field must be stripped from the function object"
     );
 }
 

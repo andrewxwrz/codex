@@ -185,6 +185,10 @@ pub fn strip_metadata_from_json(value: Value) -> Value {
 }
 
 impl ResponsesRequest {
+    pub fn headers(&self) -> &wiremock::http::HeaderMap {
+        &self.0.headers
+    }
+
     pub fn body_json(&self) -> Value {
         let body = decode_body_bytes(
             &self.0.body,
@@ -1074,6 +1078,64 @@ fn compact_mock() -> (MockBuilder, ResponseMock) {
         .and(path_regex(".*/responses/compact$"))
         .and(response_mock.clone());
     (mock, response_mock)
+}
+
+fn chat_completions_mock() -> (MockBuilder, ResponseMock) {
+    let response_mock = ResponseMock::new();
+    let mock = Mock::given(method("POST"))
+        .and(path_regex(".*/chat/completions$"))
+        .and(response_mock.clone());
+    (mock, response_mock)
+}
+
+/// Mounts a single SSE response for `POST /chat/completions`.
+pub async fn mount_chat_sse_once(server: &MockServer, body: String) -> ResponseMock {
+    let (mock, response_mock) = chat_completions_mock();
+    mock.respond_with(sse_response(body))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    response_mock
+}
+
+/// Mounts a sequence of SSE responses for `POST /chat/completions`, served in
+/// order and panicking if more requests arrive than bodies provided.
+pub async fn mount_chat_sse_sequence(server: &MockServer, bodies: Vec<String>) -> ResponseMock {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    struct SeqResponder {
+        num_calls: AtomicUsize,
+        responses: Vec<String>,
+    }
+
+    impl Respond for SeqResponder {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
+            let missing_response_message = format!("no chat response for {call_num}");
+            let body = self
+                .responses
+                .get(call_num)
+                .expect(&missing_response_message);
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body.clone())
+        }
+    }
+
+    let num_calls = bodies.len();
+    let responder = SeqResponder {
+        num_calls: AtomicUsize::new(0),
+        responses: bodies,
+    };
+
+    let (mock, response_mock) = chat_completions_mock();
+    mock.respond_with(responder)
+        .up_to_n_times(num_calls as u64)
+        .expect(num_calls as u64)
+        .mount(server)
+        .await;
+    response_mock
 }
 
 fn models_mock() -> (MockBuilder, ModelsMock) {
