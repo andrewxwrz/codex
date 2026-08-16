@@ -159,6 +159,15 @@ pub struct ConfigToml {
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
 
+    /// Optional provider id (key into `model_providers`) used for image
+    /// understanding when the active model cannot consume images directly
+    /// (for example: DeepSeek "brain" + GPT-5.6 Luna "eyes").
+    pub vision_provider: Option<String>,
+
+    /// Model id to use on the configured `vision_provider` for image
+    /// understanding. Required when `vision_provider` is set.
+    pub vision_model: Option<String>,
+
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 

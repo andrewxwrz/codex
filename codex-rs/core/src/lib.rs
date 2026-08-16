@@ -65,6 +65,7 @@ mod mcp_tool_exposure;
 mod network_policy_decision;
 pub use mcp::McpManager;
 mod original_image_detail;
+mod vision_bridge;
 pub use codex_mcp::CodexAppsToolsCache;
 pub use codex_mcp::SandboxState;
 mod mcp_openai_file;

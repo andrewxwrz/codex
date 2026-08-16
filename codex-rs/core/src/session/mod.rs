@@ -35,6 +35,11 @@ use crate::image_preparation::ImagePreparationMode;
 use crate::image_preparation::ImageResizeNoticeMode;
 use crate::image_preparation::prepare_response_items as prepare_image_response_items;
 use crate::image_preparation::unified_image_budget_enabled;
+use crate::vision_bridge::bridge_user_input_images;
+use crate::vision_bridge::bridge_response_item_images;
+use crate::vision_bridge::response_items_have_images;
+use crate::vision_bridge::user_input_has_images;
+use crate::vision_bridge::vision_bridge_from_config;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
@@ -3023,8 +3028,28 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
+        let mut items = items.to_vec();
+        let active_model_supports_images = turn_context
+            .model_info
+            .input_modalities
+            .contains(&codex_protocol::openai_models::InputModality::Image);
+        if !active_model_supports_images
+            && response_items_have_images(&items)
+            && let Some(vision) = vision_bridge_from_config(
+                &turn_context.config,
+                turn_context.auth_manager.clone(),
+            )
+        {
+            // Tool-returned images (for example `view_image` screenshots) also
+            // go through Luna when the active model is text-only. On failure,
+            // keep the images: history normalization replaces them with a
+            // placeholder before the request is sent.
+            if let Err(err) = bridge_response_item_images(&mut items, &vision).await {
+                tracing::warn!(error = %err, "vision bridge failed for tool output; keeping image in history");
+            }
+        }
         let (items, image_preparations) =
-            self.prepare_conversation_items_for_history(turn_context, items);
+            self.prepare_conversation_items_for_history(turn_context, &items);
         let items = items
             .into_owned()
             .into_iter()
@@ -4026,7 +4051,28 @@ impl Session {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
-        let response_item = self.response_item_from_user_input(input.to_vec());
+        let mut history_input = input.to_vec();
+        let active_model_supports_images = turn_context
+            .model_info
+            .input_modalities
+            .contains(&codex_protocol::openai_models::InputModality::Image);
+        if !active_model_supports_images
+            && user_input_has_images(&history_input)
+            && let Some(vision) = vision_bridge_from_config(
+                &turn_context.config,
+                turn_context.auth_manager.clone(),
+            )
+        {
+            // "Luna as eyes": the active (text-only) model cannot consume the
+            // image, so describe it through the configured vision provider and
+            // persist the description instead. On failure, keep the image:
+            // the normal history normalization replaces unsupported images
+            // with a placeholder before the request is sent.
+            if let Err(err) = bridge_user_input_images(&mut history_input, &vision).await {
+                tracing::warn!(error = %err, "vision bridge failed; keeping image in history");
+            }
+        }
+        let response_item = self.response_item_from_user_input(history_input);
         self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
             .await;
         let mut user_message_item = UserMessageItem::new(input);

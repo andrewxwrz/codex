@@ -89,11 +89,18 @@ impl ViewImageHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+        let vision_bridge_enabled = invocation
+            .turn
+            .config
+            .vision_provider
+            .is_some()
+            && invocation.turn.config.vision_model.is_some();
         if !invocation
             .turn
             .model_info
             .input_modalities
             .contains(&InputModality::Image)
+            && !vision_bridge_enabled
         {
             return Err(FunctionCallError::RespondToModel(
                 VIEW_IMAGE_UNSUPPORTED_MESSAGE.to_string(),

@@ -590,6 +590,17 @@ pub struct Config {
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
 
+    /// Optional provider id (key into the model_providers map) used for image
+    /// understanding when the active model cannot consume images directly.
+    pub vision_provider_id: Option<String>,
+
+    /// Info needed to make an API request to the vision provider, when
+    /// `vision_provider_id` is configured.
+    pub vision_provider: Option<ModelProviderInfo>,
+
+    /// Model id to use on the vision provider for image understanding.
+    pub vision_model: Option<String>,
+
     /// Optionally specify the personality of the model
     pub personality: Option<Personality>,
 
@@ -3622,6 +3633,28 @@ impl Config {
                 std::io::Error::new(std::io::ErrorKind::NotFound, message)
             })?
             .clone();
+        let vision_provider_id = cfg.vision_provider.clone();
+        let vision_provider = match &vision_provider_id {
+            Some(id) => Some(
+                model_providers
+                    .get(id)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("Vision provider `{id}` not found in model_providers"),
+                        )
+                    })?
+                    .clone(),
+            ),
+            None => None,
+        };
+        if vision_provider.is_some() && cfg.vision_model.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "`vision_provider` requires `vision_model` to be set",
+            ));
+        }
+        let vision_model = cfg.vision_model.clone();
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
@@ -3973,6 +4006,9 @@ impl Config {
                 .unwrap_or_default(),
             model_provider_id,
             model_provider,
+            vision_provider_id,
+            vision_provider,
+            vision_model,
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,
