@@ -98,6 +98,21 @@ fn png_data_url() -> String {
     )
 }
 
+/// Same image bytes as `png_data_url`, but labeled the way `view_image` labels
+/// tool-returned screenshots (`application/octet-stream`). The vision bridge
+/// must normalize this MIME type before the request reaches the provider.
+fn octet_stream_data_url() -> String {
+    let image = ImageBuffer::from_pixel(16, 16, Rgba([20u8, 40, 60, 255]));
+    let mut cursor = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .expect("encode png");
+    format!(
+        "data:application/octet-stream;base64,{}",
+        BASE64_STANDARD.encode(cursor.into_inner())
+    )
+}
+
 async fn write_workspace_png(test: &TestCodex, rel_path: &str) -> anyhow::Result<String> {
     let abs_path = test.config.cwd.join(rel_path);
     let abs_path_uri = codex_utils_path_uri::PathUri::from_host_native_path(&abs_path)?;
@@ -137,6 +152,25 @@ fn has_input_image(body: &Value) -> bool {
                 })
             })
     })
+}
+
+fn vision_image_urls(body: &Value) -> Vec<&str> {
+    request_input_items(body)
+        .iter()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|span| {
+                    if span.get("type").and_then(Value::as_str) == Some("input_image") {
+                        span.get("image_url").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect()
 }
 
 fn has_text_containing(body: &Value, needle: &str) -> bool {
@@ -195,7 +229,7 @@ async fn text_only_model_receives_luna_description_instead_of_image() -> anyhow:
     let main_mock = mount_sse_once(&main_server, main_sse).await;
 
     codex
-        .start_or_steer_turn(user_turn_with_image(&test, model, png_data_url()))
+        .start_or_steer_turn(user_turn_with_image(&test, model, octet_stream_data_url()))
         .await?;
 
     wait_for_event_with_timeout(
@@ -214,6 +248,12 @@ async fn text_only_model_receives_luna_description_instead_of_image() -> anyhow:
         Some("gpt-5.6-luna")
     );
     assert!(has_input_image(&vision_body), "Luna request must include the image");
+    assert!(
+        vision_image_urls(&vision_body)
+            .iter()
+            .any(|url| url.starts_with("data:image/png;base64,")),
+        "Luna request must receive a normalized image MIME type"
+    );
 
     // DeepSeek received exactly one request, with the description in history
     // and no image content anywhere in the prompt.

@@ -29,6 +29,8 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::user_input::UserInput;
 use codex_utils_image::data_url_from_bytes;
+use codex_utils_image::load_data_url_for_prompt;
+use codex_utils_image::PromptImageMode;
 use futures::StreamExt;
 
 use crate::config::Config;
@@ -51,6 +53,30 @@ pub(crate) const VISION_DESCRIPTION_PREFIX: &str = "[Image described by vision m
 /// model never hallucinates that it saw the image.
 pub(crate) const VISION_BRIDGE_FAILURE_MESSAGE: &str =
     "Unable to analyze the attached image with the configured vision provider.";
+
+/// Rewrites a non-image data URL into an image data URL the vision provider
+/// accepts. `view_image` and the local-image path label their payloads as
+/// `application/octet-stream`, and OpenAI-compatible Responses endpoints
+/// reject that MIME type for `input_image`. Remote URLs and correctly labeled
+/// `image/*` data URLs pass through unchanged.
+fn normalize_image_url(image_url: &str) -> CodexResult<String> {
+    if !image_url
+        .get(.."data:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        return Ok(image_url.to_string());
+    }
+    if image_url
+        .get(.."data:image/".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"))
+    {
+        return Ok(image_url.to_string());
+    }
+    let image = load_data_url_for_prompt(image_url, PromptImageMode::ResizeToFit).map_err(
+        |err| CodexErr::InvalidRequest(format!("invalid image for vision provider: {err}")),
+    )?;
+    Ok(image.into_data_url())
+}
 
 /// One-off client used to describe images through a secondary provider.
 ///
@@ -98,12 +124,12 @@ impl VisionBridge {
         content.push(ContentItem::InputText {
             text: VISION_DESCRIPTION_INSTRUCTIONS.to_string(),
         });
-        content.extend(images.into_iter().map(|(image_url, detail)| {
-            ContentItem::InputImage {
-                image_url,
+        for (image_url, detail) in images {
+            content.push(ContentItem::InputImage {
+                image_url: normalize_image_url(&image_url)?,
                 detail: Some(detail.unwrap_or(DEFAULT_IMAGE_DETAIL)),
-            }
-        }));
+            });
+        }
 
         let request = ResponsesApiRequest {
             model: self.model.clone(),
@@ -359,6 +385,33 @@ mod tests {
             image_url: image_url.to_string(),
             detail: Some(ImageDetail::High),
         }
+    }
+
+    const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn normalizes_octet_stream_data_url_to_image_mime() {
+        let octet_stream_url = format!("data:application/octet-stream;base64,{TINY_PNG_BASE64}");
+        let normalized = normalize_image_url(&octet_stream_url)
+            .expect("octet-stream data URL should be normalized");
+        assert!(
+            normalized.starts_with("data:image/png;base64,"),
+            "expected an image/png data URL, got: {normalized}"
+        );
+    }
+
+    #[test]
+    fn leaves_supported_image_urls_unchanged() {
+        assert_eq!(
+            normalize_image_url("data:image/png;base64,abc")
+                .expect("png data URL should pass through"),
+            "data:image/png;base64,abc"
+        );
+        assert_eq!(
+            normalize_image_url("https://example.com/screenshot.png")
+                .expect("remote URL should pass through"),
+            "https://example.com/screenshot.png"
+        );
     }
 
     fn local_image_item(path: &std::path::Path) -> UserInput {
