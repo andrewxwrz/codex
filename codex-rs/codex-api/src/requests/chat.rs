@@ -201,12 +201,15 @@ impl<'a> ChatRequestBuilder<'a> {
                         json!(text)
                     };
 
-                    let mut msg = json!({"role": role, "content": content_value});
-                    if role == "assistant"
+                    // Chat Completions has no `developer` role; normalize it to
+                    // `system` without changing Codex's internal representation.
+                    let chat_role = if role == "developer" { "system" } else { role };
+                    let mut msg = json!({"role": chat_role, "content": content_value});
+                    if chat_role == "assistant"
                         && let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
                         && let Some(obj) = msg.as_object_mut()
                     {
-                        obj.insert("reasoning".to_string(), json!(reasoning));
+                        obj.insert("reasoning_content".to_string(), json!(reasoning));
                     }
                     messages.push(msg);
                 }
@@ -364,14 +367,14 @@ fn push_tool_call_message(messages: &mut Vec<Value>, tool_call: Value, reasoning
     {
         tool_calls.push(tool_call);
         if let Some(reasoning) = reasoning {
-            if let Some(Value::String(existing)) = obj.get_mut("reasoning") {
+            if let Some(Value::String(existing)) = obj.get_mut("reasoning_content") {
                 if !existing.is_empty() {
                     existing.push('\n');
                 }
                 existing.push_str(reasoning);
             } else {
                 obj.insert(
-                    "reasoning".to_string(),
+                    "reasoning_content".to_string(),
                     Value::String(reasoning.to_string()),
                 );
             }
@@ -387,7 +390,7 @@ fn push_tool_call_message(messages: &mut Vec<Value>, tool_call: Value, reasoning
     if let Some(reasoning) = reasoning
         && let Some(obj) = msg.as_object_mut()
     {
-        obj.insert("reasoning".to_string(), json!(reasoning));
+        obj.insert("reasoning_content".to_string(), json!(reasoning));
     }
     messages.push(msg);
 }
@@ -433,6 +436,18 @@ mod tests {
                 body: FunctionCallOutputBody::Text(content.to_string()),
                 success: Some(true),
             },
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn reasoning(text: &str) -> ResponseItem {
+        ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: text.to_string(),
+            }]),
+            encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
         }
     }
@@ -527,5 +542,64 @@ mod tests {
         assert_eq!(messages[4]["tool_call_id"], "call-b");
         assert_eq!(messages[5]["role"], "tool");
         assert_eq!(messages[5]["tool_call_id"], "call-c");
+    }
+
+    #[test]
+    fn normalizes_developer_messages_to_system() {
+        let prompt_input = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "be concise".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            user_message("hi"),
+        ];
+
+        let req = ChatRequestBuilder::new("deepseek-v4-pro", "sys", &prompt_input, &[])
+            .build()
+            .expect("request");
+        let messages = req.body["messages"].as_array().expect("messages array");
+
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "sys");
+        assert_eq!(messages[1]["role"], "system");
+        assert_eq!(messages[1]["content"], "be concise");
+        assert_eq!(messages[2]["role"], "user");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["role"] != "developer"),
+            "the chat request must never emit a developer role"
+        );
+    }
+
+    #[test]
+    fn anchors_reasoning_content_on_tool_call_follow_up() {
+        let prompt_input = vec![
+            user_message("fix the test"),
+            reasoning("the parameter is misspelled"),
+            function_call("call-r", "edit_file", r#"{"path":"a.rs"}"#),
+            function_call_output("call-r", "done"),
+        ];
+
+        let req = ChatRequestBuilder::new("deepseek-v4-pro", "sys", &prompt_input, &[])
+            .build()
+            .expect("request");
+        let messages = req.body["messages"].as_array().expect("messages array");
+
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant tool-call message");
+        assert_eq!(
+            assistant["reasoning_content"],
+            "the parameter is misspelled",
+            "DeepSeek requires prior reasoning_content on tool-call follow-ups"
+        );
+        assert_eq!(assistant["tool_calls"][0]["id"], "call-r");
     }
 }

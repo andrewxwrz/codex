@@ -116,15 +116,26 @@ fn chat_tools_json_keeps_only_function_tools() {
         "namespaced tools are excluded on the chat wire"
     );
     assert_eq!(tools_json[0]["type"], json!("function"));
-    assert_eq!(tools_json[0]["name"], json!("read_file"));
+    assert!(
+        tools_json[0].get("name").is_none(),
+        "the chat schema puts the name inside the function object"
+    );
     assert_eq!(tools_json[0]["function"]["name"], json!("read_file"));
     assert_eq!(
         tools_json[0]["function"]["description"],
         json!("Read a file")
     );
     assert!(
-        tools_json[0]["function"].get("type").is_none(),
-        "the Responses-only type field must be stripped from the function object"
+        tools_json[0]["function"].get("strict").is_none()
+            && tools_json[0]["function"].get("type").is_none()
+            && tools_json[0]["function"].get("defer_loading").is_none()
+            && tools_json[0]["function"].get("output_schema").is_none(),
+        "Responses-only fields must never leak into the chat schema"
+    );
+    assert_eq!(
+        tools_json[0]["function"]["parameters"]["type"],
+        json!("object"),
+        "chat tool schema must carry the parameters schema"
     );
 }
 

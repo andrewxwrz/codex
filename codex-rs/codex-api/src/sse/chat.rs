@@ -20,6 +20,25 @@ use tokio::time::timeout;
 use tracing::debug;
 use tracing::trace;
 
+/// Extracts reasoning text from a Chat Completions reasoning field.
+///
+/// Providers vary: DeepSeek streams `reasoning_content` as a plain string,
+/// while other providers use `reasoning` with a string or a `{text|content}`
+/// object. Accept all of them.
+fn reasoning_text(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("text").and_then(serde_json::Value::as_str))
+        .or_else(|| value.get("content").and_then(serde_json::Value::as_str))
+}
+
+fn delta_reasoning_text<'a>(delta: &'a serde_json::Value) -> Option<&'a str> {
+    delta
+        .get("reasoning")
+        .and_then(reasoning_text)
+        .or_else(|| delta.get("reasoning_content").and_then(reasoning_text))
+}
+
 pub(crate) fn spawn_chat_stream(
     stream_response: StreamResponse,
     idle_timeout: Duration,
@@ -162,17 +181,9 @@ pub async fn process_chat_sse<S>(
 
         for choice in choices {
             if let Some(delta) = choice.get("delta") {
-                if let Some(reasoning) = delta.get("reasoning") {
-                    if let Some(text) = reasoning.as_str() {
-                        append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string())
-                            .await;
-                    } else if let Some(text) = reasoning.get("text").and_then(|v| v.as_str()) {
-                        append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string())
-                            .await;
-                    } else if let Some(text) = reasoning.get("content").and_then(|v| v.as_str()) {
-                        append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string())
-                            .await;
-                    }
+                if let Some(reasoning) = delta_reasoning_text(delta) {
+                    append_reasoning_text(&tx_event, &mut reasoning_item, reasoning.to_string())
+                        .await;
                 }
 
                 if let Some(content) = delta.get("content") {
@@ -249,15 +260,9 @@ pub async fn process_chat_sse<S>(
             }
 
             if let Some(message) = choice.get("message")
-                && let Some(reasoning) = message.get("reasoning")
+                && let Some(reasoning) = delta_reasoning_text(message)
             {
-                if let Some(text) = reasoning.as_str() {
-                    append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string()).await;
-                } else if let Some(text) = reasoning.get("text").and_then(|v| v.as_str()) {
-                    append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string()).await;
-                } else if let Some(text) = reasoning.get("content").and_then(|v| v.as_str()) {
-                    append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string()).await;
-                }
+                append_reasoning_text(&tx_event, &mut reasoning_item, reasoning.to_string()).await;
             }
 
             let finish_reason = choice.get("finish_reason").and_then(|r| r.as_str());
@@ -722,5 +727,49 @@ mod tests {
             )
         }));
         assert_matches!(events.last(), Some(ResponseEvent::Completed { .. }));
+    }
+
+    /// DeepSeek-style stream: `reasoning_content` deltas followed by a content
+    /// delta and a normal stop. Both the reasoning and the answer must surface
+    /// as shared ResponseEvents.
+    #[tokio::test]
+    async fn streams_deepseek_reasoning_content_and_answer() {
+        let body = build_body(&[
+            json!({
+                "choices": [{
+                    "delta": { "reasoning_content": "thinking about the error " }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": { "reasoning_content": "line 12." }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": { "content": "The fix is to quote the path." }
+                }]
+            }),
+            json!({
+                "choices": [{ "finish_reason": "stop" }]
+            }),
+        ]);
+        let events = collect_events(&body).await;
+
+        assert_matches!(
+            &events[..],
+            [
+                ResponseEvent::OutputItemAdded(ResponseItem::Reasoning { .. }),
+                ResponseEvent::ReasoningContentDelta { delta: first, .. },
+                ResponseEvent::ReasoningContentDelta { delta: second, .. },
+                ResponseEvent::OutputItemAdded(ResponseItem::Message { .. }),
+                ResponseEvent::OutputTextDelta(answer),
+                ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. }),
+                ResponseEvent::OutputItemDone(ResponseItem::Message { .. }),
+                ResponseEvent::Completed { .. }
+            ] if first == "thinking about the error "
+                && second == "line 12."
+                && answer == "The fix is to quote the path."
+        );
     }
 }
