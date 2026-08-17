@@ -10,6 +10,7 @@ use crate::error::ApiError;
 use crate::requests::headers::build_session_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ReasoningItemContent;
@@ -18,6 +19,25 @@ use codex_protocol::protocol::SessionSource;
 use http::HeaderMap;
 use serde_json::Value;
 use serde_json::json;
+
+/// True for response items that represent direct user input: plain user
+/// messages and inter-agent messages (subagent spawn/follow-up tasks).
+fn response_item_is_user_input(item: &ResponseItem) -> bool {
+    matches!(item, ResponseItem::Message { role, .. } if role == "user")
+        || matches!(item, ResponseItem::AgentMessage { .. })
+}
+
+/// Flatten an inter-agent message's plain-text content. Encrypted content
+/// cannot be read here and is skipped.
+fn agent_message_input_text(content: &[AgentMessageInputContent]) -> Option<String> {
+    let mut text = String::new();
+    for item in content {
+        if let AgentMessageInputContent::InputText { text: t } = item {
+            text.push_str(t);
+        }
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
 
 /// Assembled request body plus headers for Chat Completions streaming calls.
 pub struct ChatRequest {
@@ -72,6 +92,7 @@ impl<'a> ChatRequestBuilder<'a> {
         for item in input {
             match item {
                 ResponseItem::Message { role, .. } => last_emitted_role = Some(role.as_str()),
+                ResponseItem::AgentMessage { .. } => last_emitted_role = Some("user"),
                 ResponseItem::FunctionCall { .. }
                 | ResponseItem::LocalShellCall { .. }
                 | ResponseItem::ToolSearchCall { .. } => last_emitted_role = Some("assistant"),
@@ -81,7 +102,6 @@ impl<'a> ChatRequestBuilder<'a> {
                 ResponseItem::Reasoning { .. }
                 | ResponseItem::Other
                 | ResponseItem::AdditionalTools { .. }
-                | ResponseItem::AgentMessage { .. }
                 | ResponseItem::CustomToolCall { .. }
                 | ResponseItem::WebSearchCall { .. }
                 | ResponseItem::ImageGenerationCall { .. }
@@ -93,9 +113,7 @@ impl<'a> ChatRequestBuilder<'a> {
 
         let mut last_user_index: Option<usize> = None;
         for (idx, item) in input.iter().enumerate() {
-            if let ResponseItem::Message { role, .. } = item
-                && role == "user"
-            {
+            if response_item_is_user_input(item) {
                 last_user_index = Some(idx);
             }
         }
@@ -212,6 +230,11 @@ impl<'a> ChatRequestBuilder<'a> {
                         obj.insert("reasoning_content".to_string(), json!(reasoning));
                     }
                     messages.push(msg);
+                }
+                ResponseItem::AgentMessage { content, .. } => {
+                    if let Some(text) = agent_message_input_text(content) {
+                        messages.push(json!({"role": "user", "content": text}));
+                    }
                 }
                 ResponseItem::FunctionCall {
                     name,
@@ -414,6 +437,57 @@ mod tests {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         }
+    }
+
+    fn agent_message(text: &str) -> ResponseItem {
+        ResponseItem::AgentMessage {
+            id: None,
+            author: "/root".to_string(),
+            recipient: "/root/worker".to_string(),
+            content: vec![AgentMessageInputContent::InputText {
+                text: text.to_string(),
+            }],
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    #[test]
+    fn includes_subagent_spawn_messages_as_user_content() {
+        let prompt_input = vec![agent_message("Render the docs and give me a link")];
+        let req = ChatRequestBuilder::new("gpt-test", "inst", &prompt_input, &[])
+            .build()
+            .expect("request");
+
+        let messages = req.body["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Render the docs and give me a link");
+    }
+
+    #[test]
+    fn agent_message_text_flattens_input_text_only() {
+        assert_eq!(
+            agent_message_input_text(&[AgentMessageInputContent::InputText {
+                text: "task".to_string(),
+            }])
+            .as_deref(),
+            Some("task")
+        );
+        assert_eq!(
+            agent_message_input_text(&[AgentMessageInputContent::EncryptedContent {
+                encrypted_content: "secret".to_string(),
+            }]),
+            None
+        );
+        assert_eq!(agent_message_input_text(&[]), None);
+    }
+
+    #[test]
+    fn user_input_detection_covers_messages_and_agent_messages() {
+        assert!(response_item_is_user_input(&user_message("hi")));
+        assert!(response_item_is_user_input(&agent_message("task")));
+        assert!(!response_item_is_user_input(&function_call("c1", "f", "{}")));
     }
 
     fn function_call(call_id: &str, name: &str, arguments: &str) -> ResponseItem {

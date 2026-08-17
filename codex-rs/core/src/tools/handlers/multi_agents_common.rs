@@ -289,11 +289,18 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
             .models_manager
             .list_models(RefreshStrategy::Offline, config.http_client_factory())
             .await;
-        let selected_model_name = find_spawn_agent_model_name(
+        let selected_model_name = match find_spawn_agent_model_name(
             &available_models,
             requested_model,
             turn.multi_agent_version,
-        )?;
+        ) {
+            Ok(name) => name,
+            // The harness may pass the parent's own running model (for example
+            // a custom or tunneled slug that is not in the local preset list).
+            // Inheriting it keeps spawns working instead of rejecting them.
+            Err(_) if requested_model == turn.model_info.slug => requested_model.to_string(),
+            Err(err) => return Err(err),
+        };
         let selected_model_info = session
             .services
             .models_manager
